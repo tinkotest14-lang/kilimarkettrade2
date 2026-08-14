@@ -1191,32 +1191,42 @@ export function EABOTestPage() {
     if (!user || isLocalMode()) return null;
 
     const closedAt = new Date().toISOString();
+    const isBot = position.botId ? true : false;
+    const tableName = isBot ? "bot_trades" : "manual_trades";
+
+    // Build payload based on table schema
     const payload = {
       user_id: user.id,
       user_email: user.email,
       symbol: position.symbol,
-      dir: position.dir,
-      lots: position.lots,
       entry_price: position.entry,
       exit_price: exitPrice,
       pnl,
       status: "closed",
-      trade_type: position.botId ? "bot" : "manual",
       outcome_mode: position.outcomeMode ?? "normal",
       opened_at: new Date(position.openedAt).toISOString(),
       closed_at: closedAt,
+      ...(isBot ? {
+        side: position.dir === 1 ? "buy" : "sell",
+        volume: position.lots,
+        trade_type: "bot",
+      } : {
+        dir: position.dir,
+        lots: position.lots,
+        trade_type: "manual",
+      }),
     };
 
     try {
       if (position.dbId) {
-        const { error } = await (supabase as any).from("manual_trades").update(payload).eq("id", position.dbId);
+        const { error } = await (supabase as any).from(tableName).update(payload).eq("id", position.dbId);
         if (!error) {
           addClosedTradeToHistory(position, pnl, exitPrice, closedAt, source);
           return position.dbId;
         }
       }
 
-      const inserted = await (supabase as any).from("manual_trades").insert(payload).select("id").single();
+      const inserted = await (supabase as any).from(tableName).insert(payload).select("id").single();
       if (inserted.error) throw inserted.error;
       addClosedTradeToHistory({ ...position, dbId: inserted.data?.id ?? position.dbId }, pnl, exitPrice, closedAt, source);
       return inserted.data?.id ?? null;
@@ -1229,19 +1239,30 @@ export function EABOTestPage() {
 
   const persistDemoPosition = async (position: Position) => {
     if (!user || isLocalMode()) return null;
+    const isBot = position.botId ? true : false;
+    const tableName = isBot ? "bot_trades" : "manual_trades";
+
     try {
-      const inserted = await (supabase as any).from("manual_trades").insert({
+      const payload = {
         user_id: user.id,
         user_email: user.email,
         symbol: position.symbol,
-        dir: position.dir,
-        lots: position.lots,
         entry_price: position.entry,
         status: "open",
-        trade_type: position.botId ? "bot" : "manual",
         outcome_mode: position.outcomeMode ?? "normal",
         opened_at: new Date(position.openedAt).toISOString(),
-      }).select("id").single();
+        ...(isBot ? {
+          side: position.dir === 1 ? "buy" : "sell",
+          volume: position.lots,
+          trade_type: "bot",
+        } : {
+          dir: position.dir,
+          lots: position.lots,
+          trade_type: "manual",
+        }),
+      };
+
+      const inserted = await (supabase as any).from(tableName).insert(payload).select("id").single();
       if (inserted.error) throw inserted.error;
       return inserted.data?.id ?? null;
     } catch (error) {
