@@ -31,3 +31,10 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Local test scripts
+check-db-status.mjs
+create-test-trades.mjs
+run-migration-direct.mjs
+test-bot-trades-insert.mjs
+test-exec.mjs
