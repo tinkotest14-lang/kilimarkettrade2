@@ -778,6 +778,7 @@ export function EABOTestPage() {
   const [market, setMarket] = useState<MarketState>(() => ({ ...seedMarket(), ...(persistedState?.market ?? {}) }));
   const [balance, setBalance] = useState(persistedState?.balance ?? START_BALANCE);
   const [positions, setPositions] = useState<Position[]>(persistedState?.positions ?? []);
+  const [closedTrades, setClosedTrades] = useState<any[]>([]);
   const [demoOutcomeMode, setDemoOutcomeMode] = useState<DemoOutcomeMode>("normal");
   const [activity, setActivity] = useState<ActivityItem[]>(persistedState?.activity ?? [{ t: Date.now(), text: "Simulation started — demo account funded with $10,000.00.", kind: "info" }]);
   const [bots, setBots] = useState<BotModel[]>(persistedState?.bots ?? []);
@@ -997,6 +998,59 @@ export function EABOTestPage() {
     return () => window.clearInterval(timer);
   }, [paymentModal.open]);
 
+  // Fetch closed trades from database
+  useEffect(() => {
+    const fetchClosedTrades = async () => {
+      try {
+        if (!user?.id || !supabase) return;
+
+        // Fetch closed manual trades
+        const { data: manualTrades, error: manualError } = await supabase
+          .from("manual_trades")
+          .select("*")
+          .eq("user_id", user.id)
+          .eq("status", "closed")
+          .order("closed_at", { ascending: false })
+          .limit(50);
+
+        if (manualError) {
+          console.warn("Failed to fetch closed manual trades:", manualError);
+        }
+
+        // Fetch closed bot trades
+        const { data: botTrades, error: botError } = await supabase
+          .from("bot_trades")
+          .select("*")
+          .eq("user_id", user.id)
+          .eq("status", "closed")
+          .order("closed_at", { ascending: false })
+          .limit(50);
+
+        if (botError) {
+          console.warn("Failed to fetch closed bot trades:", botError);
+        }
+
+        // Combine and sort by closed_at
+        const allClosed = [
+          ...(manualTrades || []).map((t: any) => ({ ...t, source: "manual", side: t.dir === 1 ? "buy" : "sell", volume: t.lots })),
+          ...(botTrades || []).map((t: any) => ({ ...t, source: "bot" })),
+        ].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
+
+        setClosedTrades(allClosed);
+      } catch (err) {
+        console.warn("Error fetching closed trades:", err);
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void fetchClosedTrades();
+    }, 5000); // Refresh every 5 seconds
+
+    void fetchClosedTrades(); // Fetch immediately on mount
+
+    return () => window.clearInterval(timer);
+  }, [user?.id]);
+
   useEffect(() => {
     const interval = window.setInterval(() => {
       setBots((prevBots) => {
@@ -1035,12 +1089,8 @@ export function EABOTestPage() {
                 const rawPnl = (current.price - existing.entry) * existing.dir * existing.lots * def.multiplier;
                 const pnl = resolveDemoPnl(rawPnl, existing);
                 setBalance((value) => value + pnl);
-                if (existing.dbId) {
-                  void (supabase as any).from("manual_trades").update({
-                    exit_price: existing.entry + (existing.dir === 1 ? pnl : -pnl) / Math.max(existing.lots * def.multiplier, 0.000001),
-                    pnl, status: "closed", closed_at: new Date().toISOString(), outcome_mode: existing.outcomeMode ?? "normal"
-                  }).eq("id", existing.dbId);
-                }
+                const exitPrice = existing.entry + (existing.dir === 1 ? pnl : -pnl) / Math.max(existing.lots * def.multiplier, 0.000001);
+                void persistClosedTrade({ ...existing, outcomeMode: existing.outcomeMode ?? "normal" }, pnl, exitPrice, "bot");
                 logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — closed on signal flip, realized ${fmtMoney(pnl)}.`, pnl >= 0 ? "buy" : "sell");
                 return positionsState.filter((pos) => pos.id !== existing.id);
               }
@@ -1115,6 +1165,68 @@ export function EABOTestPage() {
     return position.outcomeMode === "profit" ? Math.max(Math.abs(rawPnl), fallback) : -Math.max(Math.abs(rawPnl), fallback);
   };
 
+  const addClosedTradeToHistory = (position: Position, pnl: number, exitPrice: number, closedAt: string, source: "manual" | "bot" = "manual") => {
+    const historyEntry = {
+      id: position.dbId ?? `history-${position.id}`,
+      source,
+      symbol: position.symbol,
+      side: position.dir === 1 ? "buy" : "sell",
+      volume: position.lots,
+      lots: position.lots,
+      dir: position.dir,
+      entry_price: position.entry,
+      exit_price: exitPrice,
+      pnl,
+      status: "closed",
+      outcome_mode: position.outcomeMode ?? "normal",
+      closed_at: closedAt,
+      created_at: closedAt,
+      trade_type: position.botId ? "bot" : "manual",
+    };
+
+    setClosedTrades((prev) => [historyEntry, ...prev.filter((entry) => entry.id !== historyEntry.id)]);
+  };
+
+  const persistClosedTrade = async (position: Position, pnl: number, exitPrice: number, source: "manual" | "bot" = "manual") => {
+    if (!user || isLocalMode()) return null;
+
+    const closedAt = new Date().toISOString();
+    const payload = {
+      user_id: user.id,
+      user_email: user.email,
+      symbol: position.symbol,
+      dir: position.dir,
+      lots: position.lots,
+      entry_price: position.entry,
+      exit_price: exitPrice,
+      pnl,
+      status: "closed",
+      trade_type: position.botId ? "bot" : "manual",
+      outcome_mode: position.outcomeMode ?? "normal",
+      opened_at: new Date(position.openedAt).toISOString(),
+      closed_at: closedAt,
+    };
+
+    try {
+      if (position.dbId) {
+        const { error } = await (supabase as any).from("manual_trades").update(payload).eq("id", position.dbId);
+        if (!error) {
+          addClosedTradeToHistory(position, pnl, exitPrice, closedAt, source);
+          return position.dbId;
+        }
+      }
+
+      const inserted = await (supabase as any).from("manual_trades").insert(payload).select("id").single();
+      if (inserted.error) throw inserted.error;
+      addClosedTradeToHistory({ ...position, dbId: inserted.data?.id ?? position.dbId }, pnl, exitPrice, closedAt, source);
+      return inserted.data?.id ?? null;
+    } catch (error) {
+      console.warn("[Demo trades] Failed to save closed trade:", error);
+      addClosedTradeToHistory(position, pnl, exitPrice, closedAt, source);
+      return null;
+    }
+  };
+
   const persistDemoPosition = async (position: Position) => {
     if (!user || isLocalMode()) return null;
     try {
@@ -1143,17 +1255,13 @@ export function EABOTestPage() {
     if (!position) return;
     const rawPnl = getPositionPnl(position, market);
     const pnl = resolveDemoPnl(rawPnl, position);
+    const exitPrice = position.entry + (position.dir === 1 ? pnl : -pnl) / Math.max(position.lots * getSymbolDef(position.symbol).multiplier, 0.000001);
+
     setBalance((value) => value + pnl);
     setPositions((prev) => prev.filter((item) => item.id !== id));
-    if (position.dbId) {
-      void (supabase as any).from("manual_trades").update({
-        exit_price: position.entry + (position.dir === 1 ? pnl : -pnl) / Math.max(position.lots * getSymbolDef(position.symbol).multiplier, 0.000001),
-        pnl,
-        status: "closed",
-        closed_at: new Date().toISOString(),
-        outcome_mode: position.outcomeMode ?? "normal",
-      }).eq("id", position.dbId);
-    }
+
+    void persistClosedTrade(position, pnl, exitPrice, "manual");
+
     logActivity(`Closed ${position.symbol} ${position.dir === 1 ? "BUY" : "SELL"} ${position.lots} lots manually — realized ${fmtMoney(pnl)}.`, pnl >= 0 ? "buy" : "sell");
   };
 
@@ -1829,6 +1937,56 @@ export function EABOTestPage() {
                               <div><div className="text-[10px] uppercase" style={{ color: T.textFaint }}>P/L</div><div className="mt-1 font-mono" style={{ color: pnl >= 0 ? T.teal : T.red }}>{pnl >= 0 ? "+" : ""}{fmtMoney(pnl)}</div></div>
                             </div>
                           )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </Panel>
+
+              <Panel>
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="section-kicker">Trade History</div>
+                  <Badge tone="gray">{closedTrades.length}</Badge>
+                </div>
+                {closedTrades.length === 0 ? (
+                  <div className="rounded-xl border border-dashed p-4 text-center text-sm" style={{ borderColor: T.border, color: T.textDim }}>
+                    No closed trades yet — close a position to see it here.
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {closedTrades.map((trade) => {
+                      const pnl = trade.pnl || 0;
+                      const closedDate = trade.closed_at ? new Date(trade.closed_at) : new Date();
+                      const timeago = Math.floor((Date.now() - closedDate.getTime()) / 1000);
+                      const timeStr = timeago < 60 ? `${timeago}s ago` : timeago < 3600 ? `${Math.floor(timeago / 60)}m ago` : `${Math.floor(timeago / 3600)}h ago`;
+                      return (
+                        <div key={trade.id} className="rounded-lg border p-3" style={{ background: T.cardAlt, borderColor: T.border }}>
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="font-semibold text-sm">{trade.symbol}</span>
+                                <span className="text-[10px] uppercase tracking-[0.1em] rounded px-1.5 py-0.5" style={{ background: trade.source === "bot" ? `${T.teal}20` : `${T.blue}20`, color: trade.source === "bot" ? T.teal : T.blue }}>
+                                  {trade.source}
+                                </span>
+                              </div>
+                              <div className="text-xs" style={{ color: T.textFaint }}>
+                                <span className="font-semibold" style={{ color: trade.side === "buy" ? T.teal : T.red }}>{trade.side === "buy" ? "Buy" : "Sell"}</span>
+                                <span> · {trade.volume || trade.lots} lot{(trade.volume || trade.lots) === 1 ? "" : "s"}</span>
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="font-mono text-sm font-semibold" style={{ color: pnl >= 0 ? T.teal : T.red }}>
+                                {pnl >= 0 ? "+" : ""}{fmtMoney(pnl)}
+                              </div>
+                              <div className="text-[10px]" style={{ color: T.textFaint }}>{timeStr}</div>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 border-t pt-2 text-[11px]" style={{ borderColor: T.borderSoft }}>
+                            <div><div style={{ color: T.textFaint }}>Entry</div><div className="font-mono text-xs mt-0.5">{fmt(trade.entry_price, getSymbolDef(trade.symbol).decimals)}</div></div>
+                            <div><div style={{ color: T.textFaint }}>Exit</div><div className="font-mono text-xs mt-0.5">{fmt(trade.exit_price || 0, getSymbolDef(trade.symbol).decimals)}</div></div>
+                            <div><div style={{ color: T.textFaint }}>Outcome</div><div className="capitalize text-xs mt-0.5 font-semibold" style={{ color: trade.outcome_mode === "profit" ? T.teal : trade.outcome_mode === "loss" ? T.red : T.textFaint }}>{trade.outcome_mode}</div></div>
+                          </div>
                         </div>
                       );
                     })}

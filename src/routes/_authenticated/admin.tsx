@@ -253,43 +253,52 @@ function AdminPage() {
           console.warn("Admin trade overview server fetch failed, falling back:", err);
         }
 
-        const [uData, wData, tpData, srData, mData, rData] = await Promise.all([
+        const [uData, wData, tpData, srData, mData, rData, botTradesFallback, manualTradesFallback] = await Promise.all([
           safeSupabaseList("users", "*", (query) => query.limit(500)),
           safeSupabaseList("withdrawals", "*", (query) => query.limit(500)),
           safeSupabaseList("topups", "*", (query) => query.limit(500)),
           safeSupabaseList("subscription_requests", "*", (query) => query.order("created_at", { ascending: false }).limit(500)),
           safeSupabaseList("mt5_requests", "*", (query) => query.limit(500)),
           safeSupabaseList("account_change_requests", "*", (query) => query.limit(500)),
+          safeSupabaseList("bot_trades", "*", (query) => query.order("created_at", { ascending: false }).limit(500)),
+          safeSupabaseList("manual_trades", "*", (query) => query.order("created_at", { ascending: false }).limit(500)),
         ]);
-        const manualTradeFallback = await safeSupabaseList("manual_trades", "*", (query) => query.order("created_at", { ascending: false }).limit(500));
 
         const usersById = new Map((adminOverview?.users ?? uData ?? []).map((user: any) => [user.id, user]));
-        const normalizedTrades = (adminOverview?.trades ?? []).map((trade: any) => ({
+        
+        // Build bot trades from adminOverview or fallback
+        const botTrades = (adminOverview?.trades ?? botTradesFallback ?? []).map((trade: any) => ({
           ...trade,
+          trade_source: "bot",
+          trade_type: trade.trade_type ?? "bot",
+          side: trade.side ?? (Number(trade.dir) === 1 ? "buy" : "sell"),
+          volume: trade.volume ?? trade.lots,
           user_email: usersById.get(trade.user_id)?.email ?? trade.user_email ?? trade.user_id,
           user_name: usersById.get(trade.user_id)?.email ?? trade.user_email ?? trade.user_id,
-          outcome: trade.pnl == null ? "normal" : trade.pnl > 0 ? "profit" : trade.pnl < 0 ? "loss" : "normal",
+          outcome: trade.outcome_mode ?? (trade.pnl == null ? "normal" : trade.pnl > 0 ? "profit" : trade.pnl < 0 ? "loss" : "normal"),
+        }));
+
+        // Build manual trades from adminOverview or fallback
+        const manualTrades = (adminOverview?.manualTrades ?? manualTradesFallback ?? []).map((trade: any) => ({
+          ...trade,
+          trade_source: "manual",
+          trade_type: trade.trade_type ?? "manual",
+          side: Number(trade.dir) === 1 ? "buy" : "sell",
+          volume: trade.lots,
+          entry_price: trade.entry_price,
+          user_email: usersById.get(trade.user_id)?.email ?? trade.user_email ?? trade.user_id,
+          user_name: usersById.get(trade.user_id)?.email ?? trade.user_email ?? trade.user_id,
+          outcome: trade.outcome_mode ?? "normal",
         }));
 
         const fallbackUsers = uData ?? [];
         const fallbackSubscriptions = srData ?? [];
-        const fallbackTrades = [
-          ...(adminOverview?.trades ?? []),
-          ...manualTradeFallback.map((trade: any) => ({
-            ...trade,
-            trade_source: "manual",
-            trade_type: trade.trade_type ?? "manual",
-            side: Number(trade.dir) === 1 ? "buy" : "sell",
-            volume: trade.lots,
-            user_email: usersById.get(trade.user_id)?.email ?? trade.user_email ?? trade.user_id,
-            outcome: trade.outcome_mode ?? "normal",
-          })),
-        ];
+        const allTrades = [...botTrades, ...manualTrades];
 
         setUsers(adminOverview?.users ?? fallbackUsers);
         setWithdrawals(adminOverview?.withdrawals ?? wData ?? []);
         setTopups(adminOverview?.topups ?? tpData ?? []);
-        setTrades(normalizedTrades.length > 0 ? normalizedTrades : fallbackTrades);
+        setTrades(allTrades);
         setMt5Requests(adminOverview?.mt5Requests ?? mData ?? []);
         setRequests(adminOverview?.requests ?? rData ?? []);
         setSubscriptionRequests(adminOverview?.subscriptionRequests ?? fallbackSubscriptions);
@@ -1229,7 +1238,7 @@ function AdminPage() {
               </div>
               <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
                 <span className="rounded-full border px-2 py-1">Open: {trades.filter((trade) => (trade.status ?? "open") === "open").length}</span>
-                <span className="rounded-full border px-2 py-1">Closed: {trades.filter((trade) => trade.status === "closed").length}</span>
+                <span className="rounded-full border px-2 py-1">Closed: {trades.filter((trade) => (trade.status ?? "open") === "closed").length}</span>
                 <span className="rounded-full border px-2 py-1">Total: {trades.length}</span>
               </div>
               <div className="overflow-x-auto rounded-lg border bg-card p-3">
