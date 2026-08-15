@@ -104,7 +104,17 @@ function setLocalUsersMeta(meta: Record<string, any>) {
   setBrowserStorageItem(LOCAL_USERS_META_KEY, meta);
 }
 
-const DEFAULT_LOCAL_USER_META = { balance: 500, subscribed: false, subscription_status: null, subscription_plan: null, locked: false, page_locks: {}, wallet_address: null };
+const DEFAULT_LOCAL_USER_META = { balance: 0, subscribed: false, subscription_status: null, subscription_plan: null, subscription_amount: null, mt5_status: null, mt5_details: null, locked: false, page_locks: { '/eabottest?tab=botting': true, '/eabottest?tab=tools': true }, wallet_address: null };
+
+export function initializePageLocksForNewUser(email: string) {
+  const allMeta = getLocalUsersMeta();
+  // Check if this user entry doesn't exist yet in localStorage
+  if (!allMeta[email]) {
+    // Create a new entry with all defaults (including locked pages)
+    writeLocalUserMeta(email, DEFAULT_LOCAL_USER_META);
+    console.log('[initializePageLocksForNewUser] Created new user entry with default page locks:', DEFAULT_LOCAL_USER_META.page_locks);
+  }
+}
 
 export function getLocalUserMeta(email: string) {
   const meta = getLocalUsersMeta();

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { BottomNav } from "@/components/app/BottomNav";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
-import { ADMIN_EMAIL, getLocalUserMeta, isLocalMode, supabase } from "@/integrations/supabase/client";
+import { ADMIN_EMAIL, getLocalUserMeta, isLocalMode, supabase, initializePageLocksForNewUser } from "@/integrations/supabase/client";
 import { NAV_PAGES, pageLockKey } from "@/lib/page-locks";
 
 function normalizePageLocks(value: unknown): Record<string, boolean> {
@@ -57,6 +57,7 @@ function AuthenticatedLayout() {
       }
 
       if (isLocalMode()) {
+        initializePageLocksForNewUser(user.email ?? "");
         const locks = normalizePageLocks(getLocalUserMeta(user.email ?? "").page_locks);
         console.log('[AuthenticatedLayout] Loaded page locks from local mode:', locks);
         setUserPageLocks(locks);

@@ -327,7 +327,9 @@ type PaymentModalState = {
   amount: string;
   address: string;
   countdown: number;
-  step: "details" | "payment" | "pending";
+  step: "details" | "payment" | "pending" | "plan-select";
+  subscriptionPlan?: "pro" | "premium";
+  mt5Modal?: boolean;
 };
 
 function readLocalEaboRequests(): PendingRequest[] {
@@ -800,6 +802,10 @@ export function EABOTestPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [askText, setAskText] = useState(persistedState?.askText ?? "");
   const [subscription, setSubscription] = useState(persistedState?.subscription ?? { active: false, plan: "Basic", amount: 0 });
+  const [subscribed, setSubscribed] = useState(persistedState?.subscribed ?? false);
+  const [subscriptionStatus, setSubscriptionStatus] = useState<string | null>(persistedState?.subscriptionStatus ?? null);
+  const [mt5Status, setMt5Status] = useState<string | null>(persistedState?.mt5Status ?? null);
+  const [mt5Form, setMt5Form] = useState({ login: "", password: "", server: "" });
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>(() => {
     if (typeof window === "undefined") return persistedState?.pendingRequests ?? [];
     const allRequests = [...readLocalEaboRequests(), ...readLocalTopups(), ...readLocalWithdrawals()];
@@ -810,7 +816,7 @@ export function EABOTestPage() {
       { id: "3", type: "withdraw", title: "Withdrawal request", amount: 250, status: "Pending approval", network: "USDT TRC20", createdAt: Date.now() },
     ];
   });
-  const [paymentModal, setPaymentModal] = useState<PaymentModalState>({ open: false, type: null, selectedNetwork: "BTC", amount: "", address: "", countdown: 20 * 60, step: "details" });
+  const [paymentModal, setPaymentModal] = useState<PaymentModalState>({ open: false, type: null, selectedNetwork: "BTC", amount: "", address: "", countdown: 20 * 60, step: "details", subscriptionPlan: undefined, mt5Modal: false });
 
   useEffect(() => {
     setTab(search.tab as TabKey);
@@ -821,19 +827,26 @@ export function EABOTestPage() {
 
     const refreshUserAccount = async () => {
       if (isLocalMode()) {
-        setBalance(getLocalUserMeta(user.email ?? "").balance ?? START_BALANCE);
+        const meta = getLocalUserMeta(user.email ?? "");
+        setBalance(meta.balance ?? START_BALANCE);
+        setSubscribed(meta.subscribed ?? false);
+        setSubscriptionStatus(meta.subscription_status ?? null);
+        setMt5Status(meta.mt5_status ?? null);
         return;
       }
 
       try {
         const { data, error } = await supabase
           .from("users")
-          .select("balance, subscribed, subscription_status, subscription_plan, subscription_amount, subscription_network, trading_outcome_mode")
+          .select("balance, subscribed, subscription_status, subscription_plan, subscription_amount, subscription_network, mt5_status, trading_outcome_mode")
           .eq("id", user.id)
           .single();
 
         if (!error && data) {
           setBalance(Number(data.balance ?? START_BALANCE));
+          setSubscribed(Boolean(data.subscribed));
+          setSubscriptionStatus(data.subscription_status ?? null);
+          setMt5Status(data.mt5_status ?? null);
           setSubscription({
             active: data.subscription_status === "approved" || Boolean(data.subscribed),
             plan: data.subscription_plan ?? subscription.plan,
@@ -844,7 +857,11 @@ export function EABOTestPage() {
           }
         }
       } catch {
-        setBalance(getLocalUserMeta(user.email ?? "").balance ?? START_BALANCE);
+        const meta = getLocalUserMeta(user.email ?? "");
+        setBalance(meta.balance ?? START_BALANCE);
+        setSubscribed(meta.subscribed ?? false);
+        setSubscriptionStatus(meta.subscription_status ?? null);
+        setMt5Status(meta.mt5_status ?? null);
       }
     };
 
@@ -1365,10 +1382,138 @@ export function EABOTestPage() {
     logActivity(`Manually opened ${tradeForm.symbol} ${tradeForm.dir === 1 ? "BUY" : "SELL"} ${tradeForm.lots} lots @ ${fmt(current.price, def.decimals)}.`, tradeForm.dir === 1 ? "buy" : "sell");
   };
 
+  const handleStartBotClick = () => {
+    // Check if user has active subscription
+    if (!subscribed || subscriptionStatus !== "approved") {
+      if (subscriptionStatus === "pending") {
+        logActivity("Your subscription is pending approval. Check back soon!", "info");
+      } else {
+        // Show subscription modal with plan selection
+        setPaymentModal({
+          open: true,
+          type: "subscribe",
+          selectedNetwork: "BTC",
+          amount: "99",
+          address: getPaymentAddress("BTC"),
+          countdown: 20 * 60,
+          step: "plan-select",
+          subscriptionPlan: undefined,
+          mt5Modal: false,
+        });
+      }
+      return;
+    }
+
+    // Check if user has MT5 connection
+    if (!mt5Status || mt5Status === "not_requested") {
+      // Show MT5 modal - set flag to show it
+      setPaymentModal({
+        open: true,
+        type: null,
+        selectedNetwork: "BTC",
+        amount: "",
+        address: "",
+        countdown: 0,
+        step: "details",
+        mt5Modal: true,
+      });
+      return;
+    } else if (mt5Status === "pending") {
+      logActivity("Your MT5 connection is pending approval. Check your Profile.", "info");
+      return;
+    } else if (mt5Status === "approved") {
+      // Check if user needs to top up
+      if (balance === 0) {
+        // Show top-up modal
+        setPaymentModal({
+          open: true,
+          type: "topup",
+          selectedNetwork: "BTC",
+          amount: "500",
+          address: getPaymentAddress("BTC"),
+          countdown: 20 * 60,
+          step: "details",
+        });
+      } else {
+        // Start the bot
+        startBot();
+      }
+      return;
+    }
+  };
+
   const startBot = () => {
     const id = `bot-${Date.now()}`;
     setBots((prev) => [...prev, { id, symbol: botForm.symbol, strategyId: botForm.strategyId, timeframe: botForm.timeframe, checkSec: Number(botForm.checkSec), elapsed: 0, running: true, lastSignal: null, confHistory: [], decisions: [], sameDirectionStreak: 0, lastStreakDirection: null }]);
     logActivity(`Started ${STRATEGIES[botForm.strategyId].label} bot on ${botForm.symbol} (${botForm.timeframe}, checks every ${botForm.checkSec}s).`, "info");
+  };
+
+  const submitMt5Request = async () => {
+    if (!user || !mt5Form.login || !mt5Form.password || !mt5Form.server) {
+      logActivity("Please fill in all MT5 connection details.", "info");
+      return;
+    }
+
+    const payload = {
+      id: `mt5-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      user_id: user.id ?? null,
+      user_email: user.email ?? null,
+      login: mt5Form.login,
+      server: mt5Form.server,
+      password: mt5Form.password ?? null,
+      status: "pending",
+      details: JSON.stringify({ login: mt5Form.login, server: mt5Form.server }),
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      if (isLocalMode() || !supabase || typeof supabase.from !== 'function') {
+        const key = 'kili_local_mt5_requests';
+        const raw = typeof window !== 'undefined' ? window.localStorage.getItem(key) : null;
+        const list = raw ? JSON.parse(raw) : [];
+        list.push(payload);
+        if (typeof window !== 'undefined') window.localStorage.setItem(key, JSON.stringify(list));
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('kili-local-mt5-requests-updated'));
+        
+        // Update user meta to show pending MT5 status
+        if (payload.user_email) {
+          writeLocalUserMeta(payload.user_email, { mt5_status: 'pending', mt5_details: { login: payload.login, server: payload.server, password: payload.password ?? null } });
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('kili-local-user-meta-updated'));
+          }
+        }
+        
+        setMt5Status('pending');
+        logActivity(`MT5 connection request submitted. Login: ${mt5Form.login}`, "info");
+        setMt5Form({ login: "", password: "", server: "" });
+        closePaymentModal();
+        return;
+      }
+
+      const inserted = await supabase.from('mt5_requests').insert({ user_id: payload.user_id, user_email: payload.user_email, login: payload.login, server: payload.server, status: payload.status, details: payload.details, created_at: payload.created_at });
+      if (inserted.error) throw inserted.error;
+      
+      try {
+        const details = { login: payload.login, server: payload.server, password: payload.password ?? null };
+        if (payload.user_id) {
+          await supabase.from('users').update({ mt5_status: 'pending', mt5_details: details }).eq('id', payload.user_id);
+        } else if (payload.user_email) {
+          await supabase.from('users').update({ mt5_status: 'pending', mt5_details: details }).eq('email', payload.user_email);
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('kili-local-user-meta-updated'));
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      setMt5Status('pending');
+      logActivity(`MT5 connection request submitted. Login: ${mt5Form.login}`, "info");
+      setMt5Form({ login: "", password: "", server: "" });
+      closePaymentModal();
+    } catch (err: any) {
+      logActivity(`Failed to submit MT5 request: ${err?.message ?? err}`, "info");
+    }
   };
 
   const stopBot = (id: string) => {
@@ -1390,12 +1535,24 @@ export function EABOTestPage() {
       amount: defaultAmount,
       address: networkAddress,
       countdown: 20 * 60,
-      step: "details",
+      step: type === "subscribe" ? "plan-select" : "details",
+      subscriptionPlan: type === "subscribe" ? "pro" : undefined,
+      mt5Modal: false,
     });
   };
 
+  const proceedFromPlanSelect = (plan: "pro" | "premium") => {
+    const amount = plan === "premium" ? "300" : "99";
+    setPaymentModal((prev) => ({
+      ...prev,
+      subscriptionPlan: plan,
+      amount,
+      step: "details",
+    }));
+  };
+
   const closePaymentModal = () => {
-    setPaymentModal({ open: false, type: null, selectedNetwork: "BTC", amount: "", address: "", countdown: 20 * 60, step: "details" });
+    setPaymentModal({ open: false, type: null, selectedNetwork: "BTC", amount: "", address: "", countdown: 20 * 60, step: "details", subscriptionPlan: undefined, mt5Modal: false });
   };
 
   const showPaymentDetails = () => {
@@ -1423,10 +1580,7 @@ export function EABOTestPage() {
     }
 
     if (paymentModal.type === "subscribe") {
-      if (balance < parsed) {
-        logActivity("Subscription failed — insufficient balance.", "info");
-        return;
-      }
+      // Allow subscription even with $0 balance — do NOT check balance for subscriptions
     } else if (paymentModal.type === "withdraw" && parsed > balance) {
       logActivity("Withdrawal failed — insufficient balance.", "info");
       return;
@@ -1529,17 +1683,25 @@ export function EABOTestPage() {
 
     window.setTimeout(() => {
       if (paymentModal.type === "subscribe") {
-        setBalance((value) => value - parsed);
-        setSubscription({ active: false, plan: "Pro Bot", amount: parsed });
+        setSubscription({ active: false, plan: paymentModal.subscriptionPlan === "premium" ? "Premium" : "Pro", amount: parsed });
+        // Only deduct balance if user has sufficient funds
+        if (balance >= parsed) {
+          setBalance((value) => value - parsed);
+          logActivity(`Subscription request for ${paymentModal.subscriptionPlan === "premium" ? "Premium" : "Pro"} is pending approval and ${fmtMoney(parsed)} has been reserved.`, "info");
+        } else {
+          logActivity(`Subscription request for ${paymentModal.subscriptionPlan === "premium" ? "Premium" : "Pro"} is pending approval. No balance to reserve.`, "info");
+        }
         if (user && isLocalMode()) {
+          const currentMeta = getLocalUserMeta(user.email ?? "");
+          const newBalance = Math.max(0, currentMeta.balance - parsed);
           writeLocalUserMeta(user.email ?? "", {
-            balance: getLocalUserMeta(user.email ?? "").balance - parsed,
+            balance: newBalance,
             subscription_amount: parsed,
+            subscription_plan: paymentModal.subscriptionPlan === "premium" ? "Premium" : "Pro",
             subscription_network: paymentModal.selectedNetwork,
             subscription_request_id: requestId,
           });
         }
-        logActivity(`Subscription request for Pro Bot is pending approval and ${fmtMoney(parsed)} has been reserved.`, "info");
       } else if (paymentModal.type === "topup") {
         logActivity(`Top-up request of ${fmtMoney(parsed)} is pending approval.`, "info");
       } else {
@@ -1573,15 +1735,70 @@ export function EABOTestPage() {
         {paymentModal.open && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-3 py-6">
             <div className="w-full max-w-md rounded-3xl border p-4 shadow-2xl" style={{ background: T.card, borderColor: T.border }}>
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="section-kicker">{paymentModal.type === "subscribe" ? "Bot subscription" : paymentModal.type === "topup" ? "Top-up request" : "Withdrawal request"}</div>
-                  <div className="mt-1 text-xl font-semibold">{paymentModal.type === "subscribe" ? "Secure crypto payment" : paymentModal.type === "topup" ? "Add funds safely" : "Withdraw to a wallet"}</div>
-                </div>
-                <button onClick={closePaymentModal} className="rounded-full border p-2" style={{ background: T.cardAlt, borderColor: T.border, color: T.textDim }}>
-                  <X size={16} />
-                </button>
-              </div>
+              {paymentModal.mt5Modal ? (
+                <>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="section-kicker">Live execution</div>
+                      <div className="mt-1 text-xl font-semibold">Connect MetaTrader 5</div>
+                    </div>
+                    <button onClick={closePaymentModal} className="rounded-full border p-2" style={{ background: T.cardAlt, borderColor: T.border, color: T.textDim }}>
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <p className="mt-3 text-sm leading-6" style={{ color: T.textDim }}>Enter your broker login details to request a live execution connection.</p>
+                  
+                  <div className="mt-4 space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-[10px] uppercase tracking-[0.2em]" style={{ color: T.textFaint }}>Account login</label>
+                      <input
+                        value={mt5Form.login}
+                        onChange={(event) => setMt5Form((prev) => ({ ...prev, login: event.target.value }))}
+                        placeholder="Your MT5 account login"
+                        className="w-full rounded-lg border px-3 py-2 text-sm" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-[10px] uppercase tracking-[0.2em]" style={{ color: T.textFaint }}>Trading password</label>
+                      <input
+                        type="password"
+                        value={mt5Form.password}
+                        onChange={(event) => setMt5Form((prev) => ({ ...prev, password: event.target.value }))}
+                        placeholder="Your trading password"
+                        className="w-full rounded-lg border px-3 py-2 text-sm" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-[10px] uppercase tracking-[0.2em]" style={{ color: T.textFaint }}>Broker server</label>
+                      <input
+                        value={mt5Form.server}
+                        onChange={(event) => setMt5Form((prev) => ({ ...prev, server: event.target.value }))}
+                        placeholder="e.g. Broker-Real"
+                        className="w-full rounded-lg border px-3 py-2 text-sm" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex gap-2">
+                    <button onClick={closePaymentModal} className="flex-1 rounded-xl border px-3 py-2 text-sm font-semibold" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }}>
+                      Cancel
+                    </button>
+                    <button onClick={submitMt5Request} className="flex-1 rounded-xl px-3 py-2 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}>
+                      Connect account
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="section-kicker">{paymentModal.type === "subscribe" ? "Bot subscription" : paymentModal.type === "topup" ? "Top-up request" : "Withdrawal request"}</div>
+                      <div className="mt-1 text-xl font-semibold">{paymentModal.type === "subscribe" ? "Secure crypto payment" : paymentModal.type === "topup" ? "Add funds safely" : "Withdraw to a wallet"}</div>
+                    </div>
+                    <button onClick={closePaymentModal} className="rounded-full border p-2" style={{ background: T.cardAlt, borderColor: T.border, color: T.textDim }}>
+                      <X size={16} />
+                    </button>
+                  </div>
 
               <div className="mt-4 rounded-2xl border p-3" style={{ background: T.cardAlt, borderColor: T.border }}>
                 <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em]" style={{ color: T.textFaint }}>
@@ -1599,6 +1816,24 @@ export function EABOTestPage() {
                     <div className="mt-2 text-xs leading-relaxed" style={{ color: T.textDim }}>
                       Your request is being processed and will be finalized shortly.
                     </div>
+                  </div>
+                ) : paymentModal.step === "plan-select" ? (
+                  <div className="space-y-3">
+                    <div className="text-sm font-semibold">Select a subscription plan:</div>
+                    <button
+                      onClick={() => proceedFromPlanSelect("pro")}
+                      className="w-full rounded-xl border-2 p-4 text-left transition hover:bg-opacity-20" style={{ borderColor: paymentModal.subscriptionPlan === "pro" ? T.teal : T.border, background: paymentModal.subscriptionPlan === "pro" ? `${T.teal}20` : T.card }}
+                    >
+                      <div className="font-semibold">PRO</div>
+                      <div className="mt-1 text-sm" style={{ color: T.textDim }}>$99/month — Pro bot trading features</div>
+                    </button>
+                    <button
+                      onClick={() => proceedFromPlanSelect("premium")}
+                      className="w-full rounded-xl border-2 p-4 text-left transition hover:bg-opacity-20" style={{ borderColor: paymentModal.subscriptionPlan === "premium" ? T.teal : T.border, background: paymentModal.subscriptionPlan === "premium" ? `${T.teal}20` : T.card }}
+                    >
+                      <div className="font-semibold">PREMIUM</div>
+                      <div className="mt-1 text-sm" style={{ color: T.textDim }}>$300/month — Premium bot trading features</div>
+                    </button>
                   </div>
                 ) : paymentModal.step === "details" ? (
                   <>
@@ -1688,7 +1923,22 @@ export function EABOTestPage() {
                 <button onClick={closePaymentModal} className="flex-1 rounded-xl border px-3 py-2 text-sm font-semibold" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }}>
                   Cancel
                 </button>
-                {paymentModal.step === "details" ? (
+                {paymentModal.step === "plan-select" ? (
+                  <button
+                    onClick={() => {
+                      if (paymentModal.subscriptionPlan) {
+                        setPaymentModal((prev) => ({ ...prev, step: "details" }));
+                      } else {
+                        logActivity("Please select a plan to continue.", "info");
+                      }
+                    }}
+                    disabled={!paymentModal.subscriptionPlan}
+                    className="flex-1 rounded-xl px-3 py-2 text-sm font-semibold"
+                    style={{ background: paymentModal.subscriptionPlan ? T.teal : T.border, color: paymentModal.subscriptionPlan ? "#04231F" : T.textDim }}
+                  >
+                    Continue
+                  </button>
+                ) : paymentModal.step === "details" ? (
                   <button onClick={showPaymentDetails} className="flex-1 rounded-xl px-3 py-2 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}>
                     Continue
                   </button>
@@ -1702,6 +1952,8 @@ export function EABOTestPage() {
                   </button>
                 )}
               </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -1889,7 +2141,7 @@ export function EABOTestPage() {
                     <input type="number" min="5" value={botForm.checkSec} onChange={(event) => setBotForm((prev) => ({ ...prev, checkSec: Number(event.target.value) }))} className="w-full rounded-lg border px-2.5 py-2 text-sm" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }} />
                   </div>
                 </div>
-                <button onClick={startBot} className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}><Play size={15} /> Start bot</button>
+                <button onClick={handleStartBotClick} className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}><Play size={15} /> START BOT TRADING</button>
               </Panel>
               <Panel>
                 <div className="mb-3 section-kicker">Live indicators</div>
@@ -1940,7 +2192,7 @@ export function EABOTestPage() {
                     <input type="number" min="5" value={botForm.checkSec} onChange={(event) => setBotForm((prev) => ({ ...prev, checkSec: Number(event.target.value) }))} className="w-full rounded-lg border px-2.5 py-2 text-sm" style={{ background: T.cardAlt, borderColor: T.border, color: T.text }} />
                   </div>
                 </div>
-                <button onClick={startBot} className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}><Play size={15} /> Start bot</button>
+                <button onClick={handleStartBotClick} className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold" style={{ background: T.teal, color: "#04231F" }}><Play size={15} /> Start bot</button>
               </Panel>
 
               <Panel>
