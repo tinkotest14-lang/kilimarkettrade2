@@ -1026,11 +1026,7 @@ function AdminPage() {
             <div className="text-xs text-muted-foreground">Signed in as</div>
             <div className="font-semibold">{adminUser?.email ?? 'Unknown'}</div>
             <div className="text-xs text-muted-foreground">Role: Admin</div>
-            <div className="mt-2 flex gap-2">
-              <Button onClick={() => setSelectedUser(adminUser)}>Act as Admin</Button>
-              <Button onClick={() => setSelectedUser(null)}>Clear</Button>
-              <Button onClick={() => void callDebug()} variant="outline">Debug headers</Button>
-            </div>
+            
           </div>
           <ul className="space-y-2">
             <li>
@@ -1163,7 +1159,7 @@ function AdminPage() {
                       <th className="p-2">Subscribed</th>
                       <th className="p-2">Balance</th>
                       <th className="p-2">Locked</th>
-                      <th className="p-2">Demo Outcome</th>
+                      <th className="p-2">trade Outcome</th>
                       <th className="p-2">Actions</th>
                     </tr>
                   </thead>
@@ -1192,7 +1188,7 @@ function AdminPage() {
                           <Button onClick={() => openSubscriptionEditor(u)} variant="outline">Edit Sub</Button>
                           <Button onClick={() => openAddBalance(u)}>Add Balance</Button>
                           <Button onClick={() => void resetUserBalance(u)}>Reset</Button>
-                          <Button onClick={() => openCreateTrade(u)}>Create Trade</Button>
+                          
                           <Button onClick={() => void lockUser(u, !u.locked)}>{u.locked ? 'Unlock' : 'Lock'}</Button>
                         </td>
                       </tr>

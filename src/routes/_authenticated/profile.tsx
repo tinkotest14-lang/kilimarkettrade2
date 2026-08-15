@@ -497,19 +497,7 @@ function ProfilePage() {
         </div>
       </section>
 
-      <section className="mt-5 rounded-xl border border-border bg-card p-4">
-        <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Activity</div>
-        <div className="space-y-2 text-xs">
-          {activityItems.map((item) => (
-            <div key={item.time} className="flex gap-2 rounded-lg border border-border/70 bg-background/40 p-2">
-              <span className="shrink-0 font-mono text-muted-foreground">{item.time}</span>
-              <span className={item.kind === "buy" ? "text-emerald-400" : item.kind === "sell" ? "text-rose-400" : "text-muted-foreground"}>
-                {item.text}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
+      
 
       <section className="mt-5 rounded-xl border border-border bg-card p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -557,7 +545,7 @@ function ProfilePage() {
           </div>
           <div>
             <h2 className="text-sm font-semibold">MetaTrader 5</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Connect the account used for live execution.</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Connect your META5 trading account in real time.</p>
           </div>
         </div>
         <div className="mt-4 flex flex-col items-center rounded-xl border border-border/70 bg-surface p-3">

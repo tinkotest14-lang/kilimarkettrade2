@@ -2405,7 +2405,7 @@ export function EABOTestPage() {
               <Panel>
                 <div className="mb-3 section-kicker">Users Account Details</div>
                 {[
-                  ["Account ID", "DEMO-100294"],
+                  ["Account Status", "LIVE ACCOUNT"],
                   ["Currency", "USD"],
                   ["Leverage", `1:${LEVERAGE}`],
                   ["Balance", fmtMoney(balance)],
@@ -2415,12 +2415,7 @@ export function EABOTestPage() {
                   ["Open positions", positions.length],
                 ].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b py-2 text-sm" style={{ borderColor: T.borderSoft }}><span style={{ color: T.textDim }}>{label}</span><span className="font-mono font-semibold">{value}</span></div>)}
               </Panel>
-              <Panel>
-                <div className="mb-3 section-kicker">Activity</div>
-                <div className="space-y-2 text-xs">
-                  {activity.map((item, index) => <div key={index} className="flex gap-2"><span className="shrink-0 font-mono" style={{ color: T.textFaint }}>{new Date(item.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span><span style={{ color: item.kind === "buy" ? T.teal : item.kind === "sell" ? T.red : T.textDim }}>{item.text}</span></div>)}
-                </div>
-              </Panel>
+              
             </div>
           )}
 

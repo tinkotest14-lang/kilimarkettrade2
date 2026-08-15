@@ -117,18 +117,18 @@ function AuthenticatedLayout() {
           <div className="mb-4 text-sm uppercase tracking-[0.24em] text-muted-foreground">Access blocked</div>
           <h1 className="text-3xl font-semibold">Page locked</h1>
           <p className="mt-4 text-sm leading-6 text-muted-foreground">
-            This page is currently locked. Subscribe to unlock access and continue using the bot tools.
+            This page is currently locked. Subscribe to PRO/PREMIUM bot trading to unlock access and continue using the bot tools.
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
             <Button onClick={() => navigate({ to: "/eabottest" })} variant="secondary">
-              Subscribe for access
+              SUBSCRIBE NOW
             </Button>
             <Button onClick={() => {
               const firstOpen = NAV_PAGES.find((page) => !userPageLocks[pageLockKey(page)]);
-              const target = firstOpen?.path ?? "/profile";
+              const target = firstOpen?.path ?? "/charts";
               navigate({ to: target });
             }} variant="outline">
-              Go to available page
+              Go back to homepage
             </Button>
           </div>
         </div>
