@@ -55,6 +55,8 @@ type BotModel = {
   lastSignal: Signal | null;
   confHistory: Array<{ v: number }>;
   decisions: Array<{ t: number; action: string; reason: string; confidence: number; q?: string }>;
+  sameDirectionStreak: number;
+  lastStreakDirection: "BUY" | "SELL" | null;
 };
 
 type ActivityItem = { t: number; text: string; kind: "info" | "buy" | "sell" };
@@ -769,6 +771,14 @@ function getPositionPnl(position: Position, market: MarketState) {
   return (current.price - position.entry) * position.dir * position.lots * def.multiplier;
 }
 
+function calculateLotSizeFromConfidence(confidence: number): number {
+  if (confidence < 30) return 0;
+  if (confidence < 40) return 0.10;
+  if (confidence < 50) return 0.25;
+  if (confidence < 70) return 0.50;
+  return 1.00;
+}
+
 export function EABOTestPage() {
   const search = useSearch({ from: "/_authenticated/eabottest" });
   const { user } = useAuth();
@@ -1069,31 +1079,86 @@ export function EABOTestPage() {
           const signal = evaluateStrategy(bot.strategyId, current.indicators);
           const confHistory = [...bot.confHistory, { v: signal.confidence }].slice(-30);
           const decisions = [{ t: Date.now(), action: signal.action, reason: signal.reason, confidence: signal.confidence }, ...bot.decisions].slice(0, 12);
-          const shouldAct = signal.action !== "HOLD" && signal.confidence >= 60;
-          const shouldOpen = shouldAct && (!bot.lastSignal || bot.lastSignal.action !== signal.action || bot.lastSignal.confidence < 60);
-          const shouldFlip = shouldAct && bot.lastSignal && bot.lastSignal.action !== signal.action && bot.lastSignal.confidence >= 60;
+          const isValidSignal = signal.action !== "HOLD" && signal.confidence >= 30;
+          const botPositions = positions.filter((pos) => pos.botId === bot.id);
+          const hasPosition = botPositions.length > 0;
+          const positionDir = hasPosition ? botPositions[0].dir : null;
+          
+          let newStreak = bot.sameDirectionStreak;
+          let newStreakDirection = bot.lastStreakDirection;
+          let shouldOpenAdditional = false;
+          let shouldReverse = false;
+          
+          if (!isValidSignal) {
+            newStreak = 0;
+            newStreakDirection = null;
+          } else if (signal.action === "HOLD") {
+            newStreak = 0;
+            newStreakDirection = null;
+          } else if (!hasPosition) {
+            newStreak = 0;
+            newStreakDirection = null;
+            shouldOpenAdditional = true;
+          } else if (positionDir === 1 && signal.action === "BUY") {
+            newStreak = bot.sameDirectionStreak + 1;
+            newStreakDirection = "BUY";
+            if (newStreak === 3) {
+              shouldOpenAdditional = true;
+              newStreak = 0;
+            }
+          } else if (positionDir === -1 && signal.action === "SELL") {
+            newStreak = bot.sameDirectionStreak + 1;
+            newStreakDirection = "SELL";
+            if (newStreak === 3) {
+              shouldOpenAdditional = true;
+              newStreak = 0;
+            }
+          } else if ((positionDir === 1 && signal.action === "SELL") || (positionDir === -1 && signal.action === "BUY")) {
+            shouldReverse = true;
+            newStreak = 0;
+            newStreakDirection = null;
+          }
 
-          if (shouldOpen || shouldFlip) {
+          if (shouldOpenAdditional || shouldReverse) {
             setPositions((positionsState) => {
-              const existing = positionsState.find((pos) => pos.botId === bot.id);
               const def = getSymbolDef(bot.symbol);
-              if (!existing && shouldOpen) {
-                const newPos: Position = { id: `${bot.id}-${Date.now()}`, symbol: bot.symbol, dir: signal.action === "BUY" ? 1 : -1, lots: def.defaultLots, entry: current.price, botId: bot.id, openedAt: Date.now(), outcomeMode: demoOutcomeMode, dbId: null };
+              const newLots = calculateLotSizeFromConfidence(signal.confidence);
+              
+              if (shouldReverse) {
+                const posToClose = positionsState.filter((pos) => pos.botId === bot.id);
+                let updatedState = positionsState;
+                
+                for (const pos of posToClose) {
+                  const rawPnl = (current.price - pos.entry) * pos.dir * pos.lots * def.multiplier;
+                  const pnl = resolveDemoPnl(rawPnl, pos);
+                  setBalance((value) => value + pnl);
+                  const exitPrice = pos.entry + (pos.dir === 1 ? pnl : -pnl) / Math.max(pos.lots * def.multiplier, 0.000001);
+                  void persistClosedTrade({ ...pos, outcomeMode: pos.outcomeMode ?? "normal" }, pnl, exitPrice, "bot");
+                  updatedState = updatedState.filter((p) => p.id !== pos.id);
+                }
+                
+                logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — closed all positions on reversal.`, "info");
+                
+                if (newLots > 0) {
+                  const newPos: Position = { id: `${bot.id}-${Date.now()}`, symbol: bot.symbol, dir: signal.action === "BUY" ? 1 : -1, lots: newLots, entry: current.price, botId: bot.id, openedAt: Date.now(), outcomeMode: demoOutcomeMode, dbId: null };
+                  void persistDemoPosition(newPos).then((dbId) => {
+                    if (dbId) setPositions((prev) => prev.map((item) => item.id === newPos.id ? { ...item, dbId } : item));
+                  });
+                  logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — opened ${signal.action} ${newLots} lots @ ${fmt(current.price, def.decimals)}.`, signal.action === "BUY" ? "buy" : "sell");
+                  return [newPos, ...updatedState];
+                }
+                return updatedState;
+              }
+              
+              if (shouldOpenAdditional && newLots > 0) {
+                const newPos: Position = { id: `${bot.id}-${Date.now()}`, symbol: bot.symbol, dir: signal.action === "BUY" ? 1 : -1, lots: newLots, entry: current.price, botId: bot.id, openedAt: Date.now(), outcomeMode: demoOutcomeMode, dbId: null };
                 void persistDemoPosition(newPos).then((dbId) => {
                   if (dbId) setPositions((prev) => prev.map((item) => item.id === newPos.id ? { ...item, dbId } : item));
                 });
-                logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — opened ${signal.action} ${def.defaultLots} lots @ ${fmt(current.price, def.decimals)}.`, signal.action === "BUY" ? "buy" : "sell");
+                logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — opened ${signal.action} ${newLots} lots @ ${fmt(current.price, def.decimals)}.`, signal.action === "BUY" ? "buy" : "sell");
                 return [newPos, ...positionsState];
               }
-              if (existing && shouldFlip) {
-                const rawPnl = (current.price - existing.entry) * existing.dir * existing.lots * def.multiplier;
-                const pnl = resolveDemoPnl(rawPnl, existing);
-                setBalance((value) => value + pnl);
-                const exitPrice = existing.entry + (existing.dir === 1 ? pnl : -pnl) / Math.max(existing.lots * def.multiplier, 0.000001);
-                void persistClosedTrade({ ...existing, outcomeMode: existing.outcomeMode ?? "normal" }, pnl, exitPrice, "bot");
-                logActivity(`${bot.symbol} · ${STRATEGIES[bot.strategyId].label} — closed on signal flip, realized ${fmtMoney(pnl)}.`, pnl >= 0 ? "buy" : "sell");
-                return positionsState.filter((pos) => pos.id !== existing.id);
-              }
+              
               return positionsState;
             });
           }
@@ -1104,6 +1169,8 @@ export function EABOTestPage() {
             lastSignal: signal,
             confHistory,
             decisions,
+            sameDirectionStreak: newStreak,
+            lastStreakDirection: newStreakDirection,
           };
         });
       });
@@ -1300,7 +1367,7 @@ export function EABOTestPage() {
 
   const startBot = () => {
     const id = `bot-${Date.now()}`;
-    setBots((prev) => [...prev, { id, symbol: botForm.symbol, strategyId: botForm.strategyId, timeframe: botForm.timeframe, checkSec: Number(botForm.checkSec), elapsed: 0, running: true, lastSignal: null, confHistory: [], decisions: [] }]);
+    setBots((prev) => [...prev, { id, symbol: botForm.symbol, strategyId: botForm.strategyId, timeframe: botForm.timeframe, checkSec: Number(botForm.checkSec), elapsed: 0, running: true, lastSignal: null, confHistory: [], decisions: [], sameDirectionStreak: 0, lastStreakDirection: null }]);
     logActivity(`Started ${STRATEGIES[botForm.strategyId].label} bot on ${botForm.symbol} (${botForm.timeframe}, checks every ${botForm.checkSec}s).`, "info");
   };
 
